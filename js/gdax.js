@@ -373,6 +373,7 @@ module.exports = class gdax extends Exchange {
 
     parseOrder (order, market = undefined) {
         let timestamp = this.parse8601 (order['created_at']);
+        let completed_at = this.parse8601 (order['done_at']);
         let symbol = undefined;
         if (typeof market === 'undefined') {
             if (order['product_id'] in this.markets_by_id)
@@ -402,6 +403,7 @@ module.exports = class gdax extends Exchange {
             'id': order['id'],
             'info': order,
             'timestamp': timestamp,
+            'completed_at': completed_at,
             'datetime': this.iso8601 (timestamp),
             'lastTradeTimestamp': undefined,
             'status': status,
@@ -560,6 +562,80 @@ module.exports = class gdax extends Exchange {
             'id': response['id'],
         };
     }
+
+    async fetchDeposits (currency = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
+        if (typeof currency === 'undefined') {
+            throw new ExchangeError (this.id + ' needs currency for deposit history');
+        }
+        let curr = this.currency (currency);
+        let request = {
+            'limit': limit,
+            'currency': curr['id'],
+        };
+        let response = await this.privateGetWalletDeposits (this.extend (request, params));
+        return this.parseTransactions (response['result']['deposits'], 'deposit');
+    }
+
+    async fetchTransactions (symbol = undefined, since = undefined, limit = undefined, params = {}) {
+        await this.loadMarkets ();
+        let accounts = await this.privateGetAccounts ();
+
+        //let orders = await this.privateGetAccountsIdLedger ({id:"66870249-1908-49e4-90fd-77840f674669"});
+        //return accounts;
+        let result = [];
+        for (let b = 0; b < accounts.length; b++) {
+            let account = accounts[b];
+            let currency = account['currency'];
+            let request = {'id':account['id']};
+            let new_txs = await this.privateGetAccountsIdTransfers(request);
+            for (var i = 0; i < new_txs.length; i++) {
+              new_txs[i].symbol = currency;
+            }
+            result.push.apply( result, new_txs );
+            //result[currency] = await this.privateGetAccountsIdTransfers(request);
+            //return this.parseTransactions (response, 'withdraw');
+            //result[currency] = account;
+        }
+        //return result;
+        return this.parseTransactions(result, 'withdraw', 'market', 'since', 'limit');
+        //return this.parseBalance (result);
+    }
+
+    parseTransactions (transactions, side = undefined, market = undefined, since = undefined, limit = undefined) {
+        let result = Object.values (transactions || []).map (transaction => this.parseTransaction (transaction, side));
+        result = this.sortBy (result, 'timestamp', true)
+        let symbol = (typeof market !== 'undefined') ? market['symbol'] : undefined
+        return result;
+    }
+
+    parseTransaction (transaction, side = undefined) {
+        //console.log(this.safeString (transaction.details, 'crypto_transaction_hash'));
+        let timestamp = this.parse8601 (transaction['created_at']);
+        let completed_at = this.parse8601 (transaction['completed_at']);
+        let datetime = undefined;
+        if (typeof timestamp !== 'undefined') {
+            datetime = this.iso8601 (timestamp);
+        }
+        return {
+            'info': transaction,
+            'id': this.safeString (transaction, 'id'),
+            'txid': transaction.details.crypto_transaction_hash ? this.safeString (transaction.details, 'crypto_transaction_hash') : undefined,
+            'timestamp': timestamp,
+            'completed_at': completed_at,
+            'datetime': datetime,
+            'currency': this.safeString (transaction, 'symbol'),
+            'status': undefined,
+            'side': this.safeString (transaction, 'type'), // direction of the transaction, ('deposit' | 'withdraw')
+            'price': undefined,
+            'amount': this.safeFloat (transaction, 'amount'),
+            'fee': {
+                'cost': undefined,
+                'rate': undefined,
+            },
+        };
+    }
+
 
     sign (path, api = 'public', method = 'GET', params = {}, headers = undefined, body = undefined) {
         let request = '/' + this.implodeParams (path, params);
